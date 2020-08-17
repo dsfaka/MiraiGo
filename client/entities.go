@@ -2,7 +2,6 @@ package client
 
 import (
 	"errors"
-	"github.com/Mrs4s/MiraiGo/utils"
 	"strings"
 	"sync"
 )
@@ -37,7 +36,7 @@ type (
 		Remark   string
 		FaceId   int16
 
-		msgSeqList *utils.Cache
+		//msgSeqList *utils.Cache
 	}
 
 	FriendListResponse struct {
@@ -150,6 +149,10 @@ type (
 		client *QQClient
 	}
 
+	NewFriendEvent struct {
+		Friend *FriendInfo
+	}
+
 	groupMemberListResponse struct {
 		NextUin int64
 		list    []*GroupMemberInfo
@@ -165,6 +168,19 @@ type (
 		UploadKey  []byte
 		UploadIp   []int32
 		UploadPort []int32
+	}
+
+	pttUploadResponse struct {
+		ResultCode int32
+		Message    string
+
+		IsExists bool
+
+		ResourceId string
+		UploadKey  []byte
+		UploadIp   []int32
+		UploadPort []int32
+		FileKey    []byte
 	}
 
 	groupMessageReceiptEvent struct {

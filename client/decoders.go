@@ -4,6 +4,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/Mrs4s/MiraiGo/client/pb/pttcenter"
+	"log"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"github.com/Mrs4s/MiraiGo/binary"
 	"github.com/Mrs4s/MiraiGo/binary/jce"
 	"github.com/Mrs4s/MiraiGo/client/pb"
@@ -15,10 +21,6 @@ import (
 	"github.com/Mrs4s/MiraiGo/client/pb/structmsg"
 	"github.com/Mrs4s/MiraiGo/utils"
 	"github.com/golang/protobuf/proto"
-	"strconv"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
 var (
@@ -162,6 +164,9 @@ func decodeMessageSvcPacket(c *QQClient, _ uint16, payload []byte) (interface{},
 			if message.Head.ToUin != c.Uin {
 				continue
 			}
+			if (int64(pairMsg.LastReadTime) & 4294967295) > int64(message.Head.MsgTime) {
+				continue
+			}
 			switch message.Head.MsgType {
 			case 33: // 加群同步
 				groupJoinLock.Lock()
@@ -182,6 +187,7 @@ func decodeMessageSvcPacket(c *QQClient, _ uint16, payload []byte) (interface{},
 							}(),
 							JoinTime:   time.Now().Unix(),
 							Permission: Member,
+							Group:      group,
 						}
 						group.Members = append(group.Members, mem)
 						c.dispatchNewMemberEvent(&MemberJoinGroupEvent{
@@ -206,15 +212,7 @@ func decodeMessageSvcPacket(c *QQClient, _ uint16, payload []byte) (interface{},
 				if mem == nil || message.Head.FromUin == c.Uin {
 					continue
 				}
-				lastSeq, ok := c.lastMessageSeqTmp.Load(mem.Uin)
-				if !ok {
-					c.lastMessageSeqTmp.Store(mem.Uin, int32(-1))
-					lastSeq = int32(-1)
-				}
-				if message.Head.MsgSeq > lastSeq.(int32) {
-					c.lastMessageSeqTmp.Store(mem.Uin, message.Head.MsgSeq)
-					c.dispatchTempMessage(c.parseTempMessage(message))
-				}
+				c.dispatchTempMessage(c.parseTempMessage(message))
 			case 166: // 好友消息
 				if message.Head.FromUin == c.Uin {
 					for {
@@ -231,18 +229,20 @@ func decodeMessageSvcPacket(c *QQClient, _ uint16, payload []byte) (interface{},
 				if message.Body.RichText == nil || message.Body.RichText.Elems == nil {
 					continue
 				}
-				friend := c.FindFriend(message.Head.FromUin)
-				if friend == nil {
-					return nil, nil
-				}
-				if friend.msgSeqList == nil {
-					friend.msgSeqList = utils.NewCache(time.Second * 5)
-				}
-				strSeq := strconv.FormatInt(int64(message.Head.MsgSeq), 10)
-				if _, ok := friend.msgSeqList.Get(strSeq); ok {
-					continue
-				}
-				friend.msgSeqList.Add(strSeq, 0, time.Second*15)
+				//friend := c.FindFriend(message.Head.FromUin)
+				/*
+					if friend == nil {
+						return nil, nil
+					}
+					if friend.msgSeqList == nil {
+						friend.msgSeqList = utils.NewCache(time.Second * 5)
+					}
+					strSeq := strconv.FormatInt(int64(message.Head.MsgSeq), 10)
+					if _, ok := friend.msgSeqList.Get(strSeq); ok {
+						continue
+					}
+					friend.msgSeqList.Add(strSeq, 0, time.Minute*15)
+				*/
 				c.dispatchFriendMessage(c.parsePrivateMessage(message))
 			case 187:
 				_, pkt := c.buildSystemMsgNewFriendPacket()
@@ -252,8 +252,7 @@ func decodeMessageSvcPacket(c *QQClient, _ uint16, payload []byte) (interface{},
 	}
 	_, _ = c.sendAndWait(c.buildDeleteMessageRequestPacket(delItems))
 	if rsp.SyncFlag != msg.SyncFlag_STOP {
-		seq, pkt := c.buildGetMessageRequestPacket(rsp.SyncFlag, time.Now().Unix())
-		_, _ = c.sendAndWait(seq, pkt)
+		_, _ = c.sendAndWait(c.buildGetMessageRequestPacket(rsp.SyncFlag, time.Now().Unix()))
 	}
 	return nil, err
 }
@@ -295,8 +294,10 @@ func decodeGroupMessagePacket(c *QQClient, _ uint16, payload []byte) (interface{
 }
 
 func decodeSvcNotify(c *QQClient, _ uint16, _ []byte) (interface{}, error) {
-	_, pkt := c.buildGetMessageRequestPacket(msg.SyncFlag_START, time.Now().Unix())
-	return nil, c.send(pkt)
+	c.msgSvcLock.Lock()
+	defer c.msgSvcLock.Unlock()
+	_, err := c.sendAndWait(c.buildGetMessageRequestPacket(msg.SyncFlag_START, time.Now().Unix()))
+	return nil, err
 }
 
 func decodeFriendGroupListResponse(_ *QQClient, _ uint16, payload []byte) (interface{}, error) {
@@ -388,7 +389,7 @@ func decodeGroupImageStoreResponse(_ *QQClient, _ uint16, payload []byte) (inter
 	if err != nil {
 		return nil, err
 	}
-	rsp := pkt.MsgTryupImgRsp[0]
+	rsp := pkt.MsgTryUpImgRsp[0]
 	if rsp.Result != 0 {
 		return imageUploadResponse{
 			ResultCode: rsp.Result,
@@ -402,6 +403,30 @@ func decodeGroupImageStoreResponse(_ *QQClient, _ uint16, payload []byte) (inter
 		UploadKey:  rsp.UpUkey,
 		UploadIp:   rsp.Uint32UpIp,
 		UploadPort: rsp.Uint32UpPort,
+	}, nil
+}
+
+func decodeGroupPttStoreResponse(_ *QQClient, _ uint16, payload []byte) (interface{}, error) {
+	pkt := pb.D388RespBody{}
+	err := proto.Unmarshal(payload, &pkt)
+	if err != nil {
+		return nil, err
+	}
+	rsp := pkt.MsgTryUpPttRsp[0]
+	if rsp.Result != 0 {
+		return pttUploadResponse{
+			ResultCode: rsp.Result,
+			Message:    rsp.FailMsg,
+		}, nil
+	}
+	if rsp.BoolFileExit {
+		return pttUploadResponse{IsExists: true}, nil
+	}
+	return pttUploadResponse{
+		UploadKey:  rsp.UpUkey,
+		UploadIp:   rsp.Uint32UpIp,
+		UploadPort: rsp.Uint32UpPort,
+		FileKey:    rsp.FileKey,
 	}, nil
 }
 
@@ -522,6 +547,17 @@ func decodeOnlinePushReqPacket(c *QQClient, seq uint16, payload []byte) (interfa
 						})
 					}
 				}
+			case 0xB3:
+				b3 := pb.SubB3{}
+				if err := proto.Unmarshal(probuf, &b3); err != nil {
+					return nil, err
+				}
+				frd := &FriendInfo{
+					Uin:      b3.MsgAddFrdNotify.Uin,
+					Nickname: b3.MsgAddFrdNotify.Nick,
+				}
+				c.FriendList = append(c.FriendList, frd)
+				c.dispatchNewFriendEvent(&NewFriendEvent{Friend: frd})
 			case 0xD4:
 				d4 := pb.SubD4{}
 				if err := proto.Unmarshal(probuf, &d4); err != nil {
@@ -632,10 +668,10 @@ func decodeSystemMsgGroupPacket(c *QQClient, _ uint16, payload []byte) (interfac
 	}
 	st := rsp.Groupmsgs[0]
 	if st.Msg != nil {
-		// 其他SubType不关心
 		if st.Msg.SubType == 1 {
-			switch st.Msg.C2CInviteJoinGroupFlag {
-			case 0: //成员申请
+			// 处理被邀请入群 或 处理成员入群申请
+			switch st.Msg.GroupMsgType {
+			case 1: // 成员申请
 				c.dispatchJoinGroupRequest(&UserJoinGroupRequest{
 					RequestId:     st.MsgSeq,
 					Message:       st.Msg.MsgAdditional,
@@ -645,7 +681,7 @@ func decodeSystemMsgGroupPacket(c *QQClient, _ uint16, payload []byte) (interfac
 					GroupName:     st.Msg.GroupName,
 					client:        c,
 				})
-			case 1: // 被邀请
+			case 2: // 被邀请
 				c.dispatchGroupInvitedEvent(&GroupInvitedRequest{
 					RequestId:   st.MsgSeq,
 					InvitorUin:  st.Msg.ActionUin,
@@ -654,7 +690,17 @@ func decodeSystemMsgGroupPacket(c *QQClient, _ uint16, payload []byte) (interfac
 					GroupName:   st.Msg.GroupName,
 					client:      c,
 				})
+			default:
+				log.Println("unknown group msg:", st)
 			}
+		} else if st.Msg.SubType == 2 {
+			// 被邀请入群, 自动同意, 不需处理
+		} else if st.Msg.SubType == 3 {
+			// 已被其他管理员处理
+		} else if st.Msg.SubType == 5 {
+			// 成员退群消息
+		} else {
+			log.Println("unknown group msg:", st)
 		}
 	}
 	return nil, nil
@@ -767,4 +813,15 @@ func decodeOIDB6d6Response(c *QQClient, _ uint16, payload []byte) (interface{}, 
 	ip := rsp.DownloadFileRsp.DownloadIp
 	url := hex.EncodeToString(rsp.DownloadFileRsp.DownloadUrl)
 	return fmt.Sprintf("http://%s/ftn_handler/%s/", ip, url), nil
+}
+
+func decodePttShortVideoDownResponse(c *QQClient, _ uint16, payload []byte) (interface{}, error) {
+	rsp := pttcenter.ShortVideoRspBody{}
+	if err := proto.Unmarshal(payload, &rsp); err != nil {
+		return nil, err
+	}
+	if rsp.PttShortVideoDownloadRsp == nil || rsp.PttShortVideoDownloadRsp.DownloadAddr == nil {
+		return nil, errors.New("resp error")
+	}
+	return rsp.PttShortVideoDownloadRsp.DownloadAddr.Host[0] + rsp.PttShortVideoDownloadRsp.DownloadAddr.UrlArgs, nil
 }

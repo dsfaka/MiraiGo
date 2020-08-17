@@ -2,7 +2,6 @@ package message
 
 import (
 	"crypto/md5"
-	"encoding/hex"
 	"github.com/Mrs4s/MiraiGo/binary"
 	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 	"github.com/Mrs4s/MiraiGo/utils"
@@ -81,6 +80,8 @@ const (
 	Service
 	Forward
 	File
+	Voice
+	Video
 )
 
 func (s *Sender) IsAnonymous() bool {
@@ -160,6 +161,15 @@ func (msg *SendingMessage) Any(filter func(e IMessageElement) bool) bool {
 	return false
 }
 
+func (msg *SendingMessage) FirstOrNil(filter func(e IMessageElement) bool) IMessageElement {
+	for _, e := range msg.Elements {
+		if filter(e) {
+			return e
+		}
+	}
+	return nil
+}
+
 func (msg *SendingMessage) Count(filter func(e IMessageElement) bool) (c int) {
 	for _, e := range msg.Elements {
 		if filter(e) {
@@ -200,6 +210,9 @@ func (s *Sender) DisplayName() string {
 }
 
 func ToProtoElems(elems []IMessageElement, generalFlags bool) (r []*msg.Elem) {
+	if len(elems) == 0 {
+		return nil
+	}
 	for _, elem := range elems {
 		if reply, ok := elem.(*ReplyElement); ok {
 			r = append(r, &msg.Elem{
@@ -243,7 +256,7 @@ func ToProtoElems(elems []IMessageElement, generalFlags bool) (r []*msg.Elem) {
 					Attr6Buf: binary.NewWriterF(func(w *binary.Writer) {
 						w.WriteUInt16(1)
 						w.WriteUInt16(0)
-						w.WriteUInt16(uint16(len(e.Display)))
+						w.WriteUInt16(uint16(len([]rune(e.Display))))
 						w.WriteByte(func() byte {
 							if e.Target == 0 {
 								return 1
@@ -330,10 +343,15 @@ func ToProtoElems(elems []IMessageElement, generalFlags bool) (r []*msg.Elem) {
 					})
 					break L
 				}
-				d, _ := hex.DecodeString("08097800C80100F00100F80100900200C80200980300A00320B00300C00300D00300E803008A04020803900480808010B80400C00400")
+				//d, _ := hex.DecodeString("08097800C80100F00100F80100900200C80200980300A00320B00300C00300D00300E803008A04020803900480808010B80400C00400")
 				r = append(r, &msg.Elem{
 					GeneralFlags: &msg.GeneralFlags{
-						PbReserve: d,
+						PbReserve: []byte{
+							0x08, 0x09, 0x78, 0x00, 0xC8, 0x01, 0x00, 0xF0, 0x01, 0x00, 0xF8, 0x01, 0x00, 0x90, 0x02, 0x00,
+							0xC8, 0x02, 0x00, 0x98, 0x03, 0x00, 0xA0, 0x03, 0x20, 0xB0, 0x03, 0x00, 0xC0, 0x03, 0x00, 0xD0,
+							0x03, 0x00, 0xE8, 0x03, 0x00, 0x8A, 0x04, 0x02, 0x08, 0x03, 0x90, 0x04, 0x80, 0x80, 0x80, 0x10,
+							0xB8, 0x04, 0x00, 0xC0, 0x04, 0x00,
+						},
 					},
 				})
 				break L
@@ -408,9 +426,23 @@ func ParseMessageElems(elems []*msg.Elem) []IMessageElement {
 				return append(res, NewText(content))
 			}
 		}
+		if elem.VideoFile != nil {
+			return append(res, &ShortVideoElement{
+				Name: string(elem.VideoFile.FileName),
+				Uuid: elem.VideoFile.FileUuid,
+				Size: elem.VideoFile.FileSize,
+				Md5:  elem.VideoFile.FileMd5,
+			})
+		}
 		if elem.Text != nil {
 			if len(elem.Text.Attr6Buf) == 0 {
-				res = append(res, NewText(elem.Text.Str))
+				res = append(res, NewText(func() string {
+					// 这么处理应该没问题
+					if strings.Contains(elem.Text.Str, "\r") && !strings.Contains(elem.Text.Str, "\r\n") {
+						return strings.ReplaceAll(elem.Text.Str, "\r", "\r\n")
+					}
+					return elem.Text.Str
+				}()))
 			} else {
 				att6 := binary.NewReader(elem.Text.Attr6Buf)
 				att6.ReadBytes(7)

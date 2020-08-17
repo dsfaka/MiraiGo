@@ -2,6 +2,7 @@ package message
 
 import (
 	"fmt"
+	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 	"strconv"
 	"strings"
 )
@@ -22,6 +23,21 @@ type GroupImageElement struct {
 	ImageId string
 	Md5     []byte
 	Url     string
+}
+
+type VoiceElement struct {
+	Name string
+	Md5  []byte
+	Size int32
+	Url  string
+
+	// --- sending ---
+	Data []byte
+}
+
+type GroupVoiceElement struct {
+	Data []byte
+	Ptt  *msg.Ptt
 }
 
 type FriendImageElement struct {
@@ -54,6 +70,14 @@ type ReplyElement struct {
 	Elements []IMessageElement
 
 	//original []*msg.Elem
+}
+
+type ShortVideoElement struct {
+	Name string
+	Uuid []byte
+	Size int32
+	Md5  []byte
+	Url  string
 }
 
 type ServiceElement struct {
@@ -174,6 +198,18 @@ func (e *ForwardElement) Type() ElementType {
 
 func (e *GroupFileElement) Type() ElementType {
 	return File
+}
+
+func (e *GroupVoiceElement) Type() ElementType {
+	return Voice
+}
+
+func (e *VoiceElement) Type() ElementType {
+	return Voice
+}
+
+func (e *ShortVideoElement) Type() ElementType {
+	return Video
 }
 
 var faceMap = map[int]string{

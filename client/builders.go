@@ -10,6 +10,7 @@ import (
 	"github.com/Mrs4s/MiraiGo/client/pb/msg"
 	"github.com/Mrs4s/MiraiGo/client/pb/multimsg"
 	"github.com/Mrs4s/MiraiGo/client/pb/oidb"
+	"github.com/Mrs4s/MiraiGo/client/pb/pttcenter"
 	"github.com/Mrs4s/MiraiGo/client/pb/structmsg"
 	"github.com/Mrs4s/MiraiGo/message"
 	"github.com/Mrs4s/MiraiGo/protocol/crypto"
@@ -202,7 +203,7 @@ func (c *QQClient) buildFriendGroupListRequestPacket(friendStartIndex, friendLis
 	})
 	req := &jce.FriendListRequest{
 		Reqtype: 3,
-		IfReflush: func() byte { // fuck golang
+		IfReflush: func() byte {
 			if friendStartIndex <= 0 {
 				return 0
 			}
@@ -385,12 +386,26 @@ func (c *QQClient) buildDeleteOnlinePushPacket(uin int64, seq uint16, delMsg []j
 // MessageSvc.PbSendMsg
 func (c *QQClient) buildGroupSendingPacket(groupCode int64, r int32, forward bool, m *message.SendingMessage) (uint16, []byte) {
 	seq := c.nextSeq()
+	var ptt *message.GroupVoiceElement
+	if i := m.FirstOrNil(func(e message.IMessageElement) bool {
+		_, ok := e.(*message.GroupVoiceElement)
+		return ok
+	}); i != nil {
+		ptt = i.(*message.GroupVoiceElement)
+		m.Elements = []message.IMessageElement{}
+	}
 	req := &msg.SendMessageRequest{
 		RoutingHead: &msg.RoutingHead{Grp: &msg.Grp{GroupCode: groupCode}},
 		ContentHead: &msg.ContentHead{PkgNum: 1},
 		MsgBody: &msg.MessageBody{
 			RichText: &msg.RichText{
 				Elems: message.ToProtoElems(m.Elements, true),
+				Ptt: func() *msg.Ptt {
+					if ptt != nil {
+						return ptt.Ptt
+					}
+					return nil
+				}(),
 			},
 		},
 		MsgSeq:     c.nextGroupSeq(),
@@ -410,10 +425,44 @@ func (c *QQClient) buildGroupSendingPacket(groupCode int64, r int32, forward boo
 }
 
 // MessageSvc.PbSendMsg
-func (c *QQClient) buildFriendSendingPacket(target int64, msgSeq, r int32, time int64, m *message.SendingMessage) (uint16, []byte) {
+func (c *QQClient) buildFriendSendingPacket(target int64, msgSeq, r, pkgNum, pkgIndex, pkgDiv int32, time int64, m []message.IMessageElement) (uint16, []byte) {
 	seq := c.nextSeq()
 	req := &msg.SendMessageRequest{
 		RoutingHead: &msg.RoutingHead{C2C: &msg.C2C{ToUin: target}},
+		ContentHead: &msg.ContentHead{PkgNum: pkgNum, PkgIndex: pkgIndex, DivSeq: pkgDiv},
+		MsgBody: &msg.MessageBody{
+			RichText: &msg.RichText{
+				Elems: message.ToProtoElems(m, false),
+			},
+		},
+		MsgSeq:  msgSeq,
+		MsgRand: r,
+		SyncCookie: func() []byte {
+			cookie := &msg.SyncCookie{
+				Time:   time,
+				Ran1:   rand.Int63(),
+				Ran2:   rand.Int63(),
+				Const1: syncConst1,
+				Const2: syncConst2,
+				Const3: 0x1d,
+			}
+			b, _ := proto.Marshal(cookie)
+			return b
+		}(),
+	}
+	payload, _ := proto.Marshal(req)
+	packet := packets.BuildUniPacket(c.Uin, seq, "MessageSvc.PbSendMsg", 1, c.OutGoingPacketSessionId, EmptyBytes, c.sigInfo.d2Key, payload)
+	return seq, packet
+}
+
+// MessageSvc.PbSendMsg
+func (c *QQClient) buildTempSendingPacket(groupUin, target int64, msgSeq, r int32, time int64, m *message.SendingMessage) (uint16, []byte) {
+	seq := c.nextSeq()
+	req := &msg.SendMessageRequest{
+		RoutingHead: &msg.RoutingHead{GrpTmp: &msg.GrpTmp{
+			GroupUin: groupUin,
+			ToUin:    target,
+		}},
 		ContentHead: &msg.ContentHead{PkgNum: 1},
 		MsgBody: &msg.MessageBody{
 			RichText: &msg.RichText{
@@ -476,7 +525,7 @@ func (c *QQClient) buildGroupImageStorePacket(groupCode int64, md5 []byte, size 
 	req := &pb.D388ReqBody{
 		NetType: 3,
 		Subcmd:  1,
-		MsgTryupImgReq: []*pb.TryUpImgReq{
+		MsgTryUpImgReq: []*pb.TryUpImgReq{
 			{
 				GroupCode:    groupCode,
 				SrcUin:       c.Uin,
@@ -544,6 +593,37 @@ func (c *QQClient) buildImageUploadPacket(data, updKey []byte, commandId int32, 
 		r = append(r, w.Bytes())
 	})
 	return
+}
+
+// PttStore.GroupPttUp
+func (c *QQClient) buildGroupPttStorePacket(groupCode int64, md5 []byte, size, codec, voiceLength int32) (uint16, []byte) {
+	seq := c.nextSeq()
+	req := &pb.D388ReqBody{
+		NetType: 3,
+		Subcmd:  3,
+		MsgTryUpPttReq: []*pb.TryUpPttReq{
+			{
+				GroupCode:     groupCode,
+				SrcUin:        c.Uin,
+				FileMd5:       md5,
+				FileSize:      int64(size),
+				FileName:      md5,
+				SrcTerm:       5,
+				PlatformType:  9,
+				BuType:        4,
+				InnerIp:       0,
+				BuildVer:      "6.5.5.663",
+				VoiceLength:   voiceLength,
+				Codec:         codec,
+				VoiceType:     1,
+				BoolNewUpChan: true,
+			},
+		},
+		Extension: EmptyBytes,
+	}
+	payload, _ := proto.Marshal(req)
+	packet := packets.BuildUniPacket(c.Uin, seq, "PttStore.GroupPttUp", 1, c.OutGoingPacketSessionId, EmptyBytes, c.sigInfo.d2Key, payload)
+	return seq, packet
 }
 
 // ProfileService.Pb.ReqSystemMsgNew.Group
@@ -913,5 +993,30 @@ func (c *QQClient) buildGroupFileDownloadReqPacket(groupCode int64, fileId strin
 	}
 	payload, _ := proto.Marshal(req)
 	packet := packets.BuildUniPacket(c.Uin, seq, "OidbSvc.0x6d6_2", 1, c.OutGoingPacketSessionId, EmptyBytes, c.sigInfo.d2Key, payload)
+	return seq, packet
+}
+
+// PttCenterSvr.ShortVideoDownReq
+func (c *QQClient) buildPttShortVideoDownReqPacket(uuid, md5 []byte) (uint16, []byte) {
+	seq := c.nextSeq()
+	body := &pttcenter.ShortVideoReqBody{
+		Cmd: 400,
+		Seq: int32(seq),
+		PttShortVideoDownloadReq: &pttcenter.ShortVideoDownloadReq{
+			FromUin:      c.Uin,
+			ToUin:        c.Uin,
+			ChatType:     1,
+			ClientType:   7,
+			FileId:       string(uuid),
+			GroupCode:    1,
+			FileMd5:      md5,
+			BusinessType: 1,
+			FileType:     2,
+			DownType:     2,
+			SceneType:    2,
+		},
+	}
+	payload, _ := proto.Marshal(body)
+	packet := packets.BuildUniPacket(c.Uin, seq, "PttCenterSvr.ShortVideoDownReq", 1, c.OutGoingPacketSessionId, EmptyBytes, c.sigInfo.d2Key, payload)
 	return seq, packet
 }
