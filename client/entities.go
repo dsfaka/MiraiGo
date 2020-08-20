@@ -191,9 +191,9 @@ type (
 
 const (
 	NeedCaptcha       LoginError = 1
-	OtherLoginError              = 3
-	UnsafeDeviceError            = 4
-	UnknownLoginError            = -1
+	OtherLoginError   LoginError = 3
+	UnsafeDeviceError LoginError = 4
+	UnknownLoginError LoginError = -1
 
 	Owner MemberPermission = iota
 	Administrator
@@ -267,19 +267,19 @@ func (m *GroupMemberInfo) Manageable() bool {
 }
 
 func (r *UserJoinGroupRequest) Accept() {
-	r.client.SolveGroupJoinRequest(r, true)
+	r.client.SolveGroupJoinRequest(r, true, false, "")
 }
 
-func (r *UserJoinGroupRequest) Reject() {
-	r.client.SolveGroupJoinRequest(r, false)
+func (r *UserJoinGroupRequest) Reject(block bool, reason string) {
+	r.client.SolveGroupJoinRequest(r, false, block, reason)
 }
 
 func (r *GroupInvitedRequest) Accept() {
-	r.client.SolveGroupJoinRequest(r, true)
+	r.client.SolveGroupJoinRequest(r, true, false, "")
 }
 
-func (r *GroupInvitedRequest) Reject() {
-	r.client.SolveGroupJoinRequest(r, false)
+func (r *GroupInvitedRequest) Reject(block bool, reason string) {
+	r.client.SolveGroupJoinRequest(r, false, block, reason)
 }
 
 func (r *NewFriendRequest) Accept() {
