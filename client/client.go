@@ -12,7 +12,6 @@ import (
 	"math"
 	"math/rand"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,7 +37,7 @@ type QQClient struct {
 	GroupList  []*GroupInfo
 	Online     bool
 
-	SequenceId              uint16
+	SequenceId              int32
 	OutGoingPacketSessionId []byte
 	RandomKey               []byte
 	Conn                    net.Conn
@@ -75,7 +74,7 @@ type QQClient struct {
 	highwayApplyUpSeq      int32
 	eventHandlers          *eventHandlers
 
-	groupListLock *sync.Mutex
+	groupListLock sync.Mutex
 	msgSvcLock    sync.Mutex
 }
 
@@ -143,7 +142,6 @@ func NewClientMd5(uin int64, passwordMd5 [16]byte) *QQClient {
 		highwayApplyUpSeq:      77918,
 		ksid:                   []byte("|454001228437590|A8.2.7.27f6ea96"),
 		eventHandlers:          &eventHandlers{},
-		groupListLock:          new(sync.Mutex),
 		msgSvcCache:            utils.NewCache(time.Second * 15),
 		transCache:             utils.NewCache(time.Second * 15),
 	}
@@ -173,7 +171,6 @@ func (c *QQClient) Login() (*LoginResponse, error) {
 		c.lastLostMsg = ""
 		c.registerClient()
 		c.startHeartbeat()
-		_, _ = c.sendAndWait(c.buildGetMessageRequestPacket(msg.SyncFlag_START, time.Now().Unix()))
 	}
 	return &l, nil
 }
@@ -183,10 +180,10 @@ func (c *QQClient) GetGroupHonorInfo(groupCode int64, honorType HonorType) (*Gro
 	if err != nil {
 		return nil, err
 	}
-	rsp := string(b)
-	data := strings.Split(strings.Split(rsp, `window.__INITIAL_STATE__=`)[1], "</script>")[0]
+	b = b[bytes.Index(b, []byte(`window.__INITIAL_STATE__=`))+25:]
+	b = b[:bytes.Index(b, []byte("</script>"))]
 	ret := GroupHonorInfo{}
-	err = json.Unmarshal([]byte(data), &ret)
+	err = json.Unmarshal(b, &ret)
 	if err != nil {
 		return nil, err
 	}
@@ -598,20 +595,10 @@ func (c *QQClient) QueryFriendImage(target int64, hash []byte, size int32) (*mes
 	}, nil
 }
 
-func (c *QQClient) ReloadGroupList(async ...bool) error {
-	f := false
-	if len(async) > 0 {
-		f = async[0]
-	}
+func (c *QQClient) ReloadGroupList() error {
 	c.groupListLock.Lock()
 	defer c.groupListLock.Unlock()
-	list, err := func() ([]*GroupInfo, error) {
-		if f {
-			return c.GetGroupListAsync()
-		} else {
-			return c.GetGroupList()
-		}
-	}()
+	list, err := c.GetGroupList()
 	if err != nil {
 		return err
 	}
@@ -625,32 +612,19 @@ func (c *QQClient) GetGroupList() ([]*GroupInfo, error) {
 		return nil, err
 	}
 	r := rsp.([]*GroupInfo)
+	wg := sync.WaitGroup{}
+	wg.Add(len(r))
 	for _, group := range r {
-		m, err := c.GetGroupMembers(group)
-		if err != nil {
-			continue
-		}
-		group.Members = m
-	}
-	return r, nil
-}
-
-func (c *QQClient) GetGroupListAsync() ([]*GroupInfo, error) {
-	rsp, err := c.sendAndWait(c.buildGroupListRequestPacket())
-	if err != nil {
-		return nil, err
-	}
-	r := rsp.([]*GroupInfo)
-	for _, group := range r {
-		g := group
-		go func() {
+		go func(g *GroupInfo, wg *sync.WaitGroup) {
+			defer wg.Done()
 			m, err := c.GetGroupMembers(g)
 			if err != nil {
 				return
 			}
 			g.Members = m
-		}()
+		}(group, &wg)
 	}
+	wg.Wait()
 	return r, nil
 }
 
@@ -847,42 +821,27 @@ func (c *QQClient) registerClient() {
 }
 
 func (c *QQClient) nextSeq() uint16 {
-	c.SequenceId++
-	c.SequenceId &= 0x7FFF
-	if c.SequenceId == 0 {
-		c.SequenceId++
-	}
-	return c.SequenceId
+	return uint16(atomic.AddInt32(&c.SequenceId, 1) & 0x7FFF)
 }
 
 func (c *QQClient) nextPacketSeq() int32 {
-	s := atomic.LoadInt32(&c.requestPacketRequestId)
-	atomic.AddInt32(&c.requestPacketRequestId, 2)
-	return s
+	return atomic.AddInt32(&c.requestPacketRequestId, 2)
 }
 
 func (c *QQClient) nextGroupSeq() int32 {
-	s := atomic.LoadInt32(&c.groupSeq)
-	atomic.AddInt32(&c.groupSeq, 2)
-	return s
+	return atomic.AddInt32(&c.groupSeq, 2)
 }
 
 func (c *QQClient) nextFriendSeq() int32 {
-	s := atomic.LoadInt32(&c.friendSeq)
-	atomic.AddInt32(&c.friendSeq, 1)
-	return s
+	return atomic.AddInt32(&c.friendSeq, 1)
 }
 
 func (c *QQClient) nextGroupDataTransSeq() int32 {
-	s := atomic.LoadInt32(&c.groupDataTransSeq)
-	atomic.AddInt32(&c.groupDataTransSeq, 2)
-	return s
+	return atomic.AddInt32(&c.groupDataTransSeq, 2)
 }
 
 func (c *QQClient) nextHighwayApplySeq() int32 {
-	s := atomic.LoadInt32(&c.highwayApplyUpSeq)
-	atomic.AddInt32(&c.highwayApplyUpSeq, 2)
-	return s
+	return atomic.AddInt32(&c.highwayApplyUpSeq, 2)
 }
 
 func (c *QQClient) send(pkt []byte) error {
